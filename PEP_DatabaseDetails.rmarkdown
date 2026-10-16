@@ -1,0 +1,125 @@
+---
+title: "PEP Database Details: administrative schema"
+author: "Stacie Koslovsky"
+toc: true
+format: html
+editor: visual
+theme: superhero
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+library("RPostgreSQL")
+library("dm")
+
+# Run code -------------------------------------------------------
+
+# Update data in DB 
+con <- RPostgreSQL::dbConnect(PostgreSQL(), 
+                              dbname = Sys.getenv("pep_db"), 
+                              host = Sys.getenv("pep_ip"), 
+                              user = Sys.getenv("pep_admin"), 
+                              password = Sys.getenv("admin_pw"))
+
+# Get tables, foreign keys, and table descriptions from database
+
+foreign_keys <- RPostgreSQL::dbGetQuery(con, "SELECT * FROM database_meta.tbl_foreign_keys") %>%
+  filter(schema_erd == 'administrative') %>%
+  filter(include_in_erd == 'Y')
+
+table_descriptions <- RPostgreSQL::dbGetQuery(con, "SELECT * FROM database_meta.tbl_table_descriptions") %>%
+  filter(schema_erd == 'administrative') %>%
+  filter(include_in_erd == 'Y')
+
+field_descriptions <- RPostgreSQL::dbGetQuery(con, "SELECT * FROM database_meta.tbl_field_descriptions") %>%
+  filter(schema == 'administrative') 
+
+tables <- dm::dm_from_con(con, schema = 'administrative') %>% 
+  dm::dm_select_tbl(table_descriptions$table_name)
+
+RPostgreSQL::dbDisconnect(con)
+
+# Assign foreign keys to tables dm
+for (i in 1:nrow(foreign_keys)) {
+  tables <- tables %>%
+    dm::dm_add_fk(table = !!foreign_keys$table_name_2[i], columns = !!foreign_keys$field_name_2[i],
+                  ref_table = !!foreign_keys$table_name_1[i], ref_columns = !!foreign_keys$field_name_1[i]) 
+}
+
+# Assign table descriptions to tables dm
+for (i in 1:nrow(table_descriptions)) {
+  desc <- rlang::set_names(table_descriptions$table_name[i],
+                           table_descriptions$table_description[i])
+  tables <- tables %>%
+    dm::dm_set_table_description(!!desc)
+}
+
+# Create dm for drawing diagram
+tables_drawn <- tables %>% 
+  dm::dm_set_colors(orange = starts_with("lku"), 
+                    darkblue = starts_with("geo"), 
+                    darkgreen = starts_with("tbl")) %>%
+  dm::dm_draw(view_type = "all",
+              rankdir = "TB",
+              graph_name = paste0("Database Diagram: administrative schema"),
+              font_size = c(header = 18L, table_description = 12L, column = 15L))
+
+
+```
+
+
+## Administrative Schema
+
+The administrative schema in the pep PostgreSQL database houses the tables that are the foundation for the PEP Dashboard.
+
+## Database Diagram
+
+The figure below depicts the tables in the administrative schema and their relationships
+
+
+```{r db_diagram, fig.width = 12, fig.height = 10}
+tables_drawn
+```
+
+
+## Table Descriptions
+
+The table below provides basic information about all the tables in the adminstrative schema.
+
+
+```{r tables, results='asis'}
+
+
+if (nrow(table_descriptions) == 0) {
+  cat("\n Uh-oh! Table descriptions are missing! \n ")
+} else {
+  table_descriptions <- table_descriptions %>%
+    select(table_name, table_description)
+  knitr::kable(table_descriptions, format = "pipe", padding = 2)
+}
+```
+
+
+## Field Descriptions by Table
+
+
+```{r fields, results='asis'}
+
+field_tables <- unique(field_descriptions$table)
+
+for (t in 1:length(field_tables)) {
+  table_name <- field_tables[t]
+  cat("\n\n### ", table_name, "\n")
+
+  fields <- field_descriptions %>%
+    filter(table == table_name) %>%
+    arrange(field_order) %>%
+    select(field_name, field_description, field_type, null_missing_data, other_information) 
+  
+  print(knitr::kable(fields, format = "pipe", padding = 2))
+
+}
+
+```
+

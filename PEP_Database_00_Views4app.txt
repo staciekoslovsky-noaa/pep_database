@@ -1,0 +1,12 @@
+CREATE OR REPLACE VIEW database_meta.data4app_fields AS 
+SELECT m.*, data_type, character_maximum_length, numeric_precision, is_nullable, column_default, ordinal_position
+FROM information_schema.columns i
+INNER JOIN database_meta.tbl_field_descriptions m
+ON i.column_name = m.field_name AND i.table_name = m.table_name AND i.table_schema = m.schema_name
+WHERE table_catalog = 'mml_pep';
+
+CREATE OR REPLACE VIEW database_meta.data4app_tables AS
+SELECT * FROM database_meta.tbl_table_descriptions;
+
+CREATE OR REPLACE VIEW database_meta.data4app_fk AS
+SELECT * FROM database_meta.tbl_foreign_keys;
