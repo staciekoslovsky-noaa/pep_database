@@ -3,6 +3,7 @@ library(DBI)
 library(RPostgres)
 library(DT)
 library(rhandsontable)
+library(visNetwork)
 
 # -----------------------------------------------------------------------------
 # Connection and database helpers
@@ -641,4 +642,294 @@ dt_widget <- function(data) {
       columnDefs = column_definitions
     )
   )
+}
+
+
+# -----------------------------------------------------------------------------
+# Database diagram helpers
+# -----------------------------------------------------------------------------
+
+SQL_DIAGRAM_TABLES <- "
+SELECT
+  id,
+  schema_name,
+  table_name,
+  table_description,
+  deprecated
+FROM database_meta.data4app_tables
+WHERE schema_name = $1
+  AND ($2 = '' OR table_name = $2)
+ORDER BY table_name, id
+"
+
+SQL_DIAGRAM_RELATIONSHIPS <- "
+SELECT
+  id,
+  schema_name,
+  table_name_1,
+  field_name_1,
+  table_name_2,
+  field_name_2,
+  join_type_1to2,
+  deprecated
+FROM database_meta.data4app_fk
+WHERE schema_name = $1
+  AND (
+    $2 = ''
+    OR table_name_1 = $2
+    OR table_name_2 = $2
+  )
+ORDER BY table_name_1, table_name_2, field_name_1, id
+"
+
+load_diagram_tables <- function(schema_name, table_name = "") {
+  db_query(SQL_DIAGRAM_TABLES, list(schema_name, table_name))
+}
+
+load_diagram_relationships <- function(schema_name, table_name = "") {
+  db_query(SQL_DIAGRAM_RELATIONSHIPS, list(schema_name, table_name))
+}
+
+normalize_join_direction <- function(join_type) {
+  toupper(trimws(as.character(join_type)))
+}
+
+join_arrow <- function(join_type) {
+  jt <- normalize_join_direction(join_type)
+
+  if (jt == "LEFT") {
+    return(list(from = "table_name_1", to = "table_name_2", label = "LEFT"))
+  }
+
+  if (jt == "RIGHT") {
+    return(list(from = "table_name_2", to = "table_name_1", label = "RIGHT"))
+  }
+
+  list(from = "table_name_1", to = "table_name_2", label = "INNER")
+}
+
+table_relationship_summary <- function(table_name, relationships) {
+  if (nrow(relationships) == 0L) {
+    return(character(0))
+  }
+
+  hits_1 <- relationships[
+    relationships$table_name_1 == table_name,
+    ,
+    drop = FALSE
+  ]
+  hits_2 <- relationships[
+    relationships$table_name_2 == table_name,
+    ,
+    drop = FALSE
+  ]
+
+  fields_1 <- if (nrow(hits_1)) {
+    paste0(hits_1$field_name_1, " → ", hits_1$field_name_2)
+  } else {
+    character(0)
+  }
+
+  fields_2 <- if (nrow(hits_2)) {
+    paste0(hits_2$field_name_2, " → ", hits_2$field_name_1)
+  } else {
+    character(0)
+  }
+
+  unique(c(fields_1, fields_2))
+}
+
+diagram_node_label <- function(schema_name, table_name, relationships) {
+  same_schema <- relationships$schema_name %in% schema_name
+
+  fields <- unique(c(
+    relationships$field_name_1[
+      same_schema & relationships$table_name_1 %in% table_name
+    ],
+    relationships$field_name_2[
+      same_schema & relationships$table_name_2 %in% table_name
+    ]
+  ))
+
+  fields <- as.character(fields)
+  fields <- sort(fields[!is.na(fields) & nzchar(trimws(fields))])
+
+  # Escape metadata before using the label's limited HTML formatting.
+  escape_label <- function(x) {
+    as.character(htmltools::htmlEscape(x))
+  }
+
+  heading <- paste0("<b>", escape_label(table_name), "</b>")
+
+  body <- if (length(fields)) {
+    escape_label(fields)
+  } else {
+    "(no joins in this view)"
+  }
+
+  paste(c(heading, "", body), collapse = "\n")
+}
+
+build_database_diagram <- function(tables, relationships, selected_table = "") {
+  if (nrow(tables) == 0L) {
+    return(
+      visNetwork::visNetwork(
+        data.frame(id = character(0), label = character(0)),
+        data.frame(from = character(0), to = character(0))
+      )
+    )
+  }
+
+  diagram_node_label <- function(table_name, relationships_for_table) {
+    fields <- unique(c(
+      relationships_for_table$field_name_1[
+        relationships_for_table$table_name_1 == table_name
+      ],
+      relationships_for_table$field_name_2[
+        relationships_for_table$table_name_2 == table_name
+      ]
+    ))
+
+    fields <- fields[!is.na(fields) & nzchar(trimws(fields))]
+
+    if (length(fields) == 0L) {
+      return(paste0("<b>", htmltools::htmlEscape(table_name), "</b>"))
+    }
+
+    paste(
+      c(
+        paste0("<b>", htmltools::htmlEscape(table_name), "</b>"),
+        "",
+        htmltools::htmlEscape(sort(unique(fields)))
+      ),
+      collapse = "\n"
+    )
+  }
+
+  nodes <- data.frame(
+    id = paste0(tables$schema_name, ".", tables$table_name),
+    label = vapply(
+      tables$table_name,
+      function(tbl) diagram_node_label(tbl, relationships),
+      character(1)
+    ),
+    title = ifelse(
+      is.na(tables$table_description) | !nzchar(tables$table_description),
+      paste0("<b>", tables$table_name, "</b>"),
+      paste0(
+        "<b>",
+        tables$table_name,
+        "</b><br/>",
+        tables$table_description
+      )
+    ),
+    group = tables$schema_name,
+    shape = "box",
+    stringsAsFactors = FALSE
+  )
+
+  nodes$color <- "#e8eef7"
+  nodes$borderWidth <- 1
+
+  selected_node_id <- if (nzchar(selected_table)) {
+    paste0(unique(tables$schema_name)[1], ".", selected_table)
+  } else {
+    ""
+  }
+
+  if (nzchar(selected_node_id) && selected_node_id %in% nodes$id) {
+    nodes$color[nodes$id == selected_node_id] <- "#2c7fb8"
+    nodes$borderWidth[nodes$id == selected_node_id] <- 3
+  }
+
+  related_ids <- if (nzchar(selected_node_id) && nrow(relationships) > 0L) {
+    unique(c(
+      selected_node_id,
+      paste0(relationships$schema_name, ".", relationships$table_name_1),
+      paste0(relationships$schema_name, ".", relationships$table_name_2)
+    ))
+  } else {
+    nodes$id
+  }
+
+  nodes$opacity <- ifelse(nodes$id %in% related_ids, 1, 0.25)
+
+  if (nrow(relationships) > 0L) {
+    edges_list <- lapply(seq_len(nrow(relationships)), function(i) {
+      rel <- relationships[i, , drop = FALSE]
+      arrow <- join_arrow(rel$join_type_1to2)
+
+      from_tbl <- rel[[arrow$from]][1]
+      to_tbl <- rel[[arrow$to]][1]
+
+      data.frame(
+        from = paste0(rel$schema_name[[1]], ".", from_tbl),
+        to = paste0(rel$schema_name[[1]], ".", to_tbl),
+        title = paste0(
+          "<b>",
+          rel$table_name_1[[1]],
+          ".",
+          rel$field_name_1[[1]],
+          "</b><br/>",
+          "→ ",
+          "<b>",
+          rel$table_name_2[[1]],
+          ".",
+          rel$field_name_2[[1]],
+          "</b><br/>",
+          "Join type: ",
+          rel$join_type_1to2[[1]]
+        ),
+        arrows = "to",
+        stringsAsFactors = FALSE
+      )
+    })
+
+    edges <- do.call(rbind, edges_list)
+  } else {
+    edges <- data.frame(from = character(0), to = character(0))
+  }
+
+  visNetwork::visNetwork(nodes, edges) |>
+    visNetwork::visNodes(
+      shape = "box",
+      margin = list(
+        top = 12,
+        right = 16,
+        bottom = 12,
+        left = 16
+      ),
+      font = list(
+        face = "Arial",
+        size = 14,
+        align = "left",
+        multi = "html",
+        bold = list(
+          face = "Arial",
+          size = 18
+        )
+      ),
+      labelHighlightBold = FALSE
+    ) |>
+    visNetwork::visEdges(
+      arrows = list(to = list(enabled = TRUE, scaleFactor = 0.7)),
+      color = list(color = "#6c757d", highlight = "#2c7fb8"),
+      smooth = FALSE,
+      width = 1.5
+    ) |>
+    visNetwork::visOptions(
+      highlightNearest = list(enabled = TRUE, degree = 1),
+      nodesIdSelection = TRUE,
+      selectedBy = "group"
+    ) |>
+    visNetwork::visPhysics(
+      stabilization = TRUE,
+      barnesHut = list(
+        gravitationalConstant = -4000,
+        springLength = 220,
+        springConstant = 0.02,
+        damping = 0.15
+      )
+    ) |>
+    visNetwork::visLayout(randomSeed = 42)
 }

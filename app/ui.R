@@ -60,6 +60,51 @@ fluidPage(
         ),
 
         tabPanel(
+          "Database Diagram",
+          br(),
+
+          fluidRow(
+            column(
+              4,
+              radioButtons(
+                "diagram_scope",
+                "Diagram view",
+                choices = c(
+                  "Selected table" = "selected",
+                  "Whole schema" = "schema"
+                ),
+                selected = "selected",
+                inline = TRUE
+              )
+            ),
+            column(
+              8,
+              helpText(
+                "Selected table shows the active table and its neighbors. ",
+                "Whole schema shows all tables and relationships in the selected schema."
+              )
+            )
+          ),
+
+          fluidRow(
+            column(
+              9,
+              visNetwork::visNetworkOutput("database_diagram", height = "720px")
+            ),
+            column(
+              3,
+              wellPanel(
+                h4(textOutput("diagram_selection_title")),
+                verbatimTextOutput("diagram_selection_details"),
+                hr(),
+                h4("Join relationships"),
+                uiOutput("diagram_relationships_panel")
+              )
+            )
+          )
+        ),
+
+        tabPanel(
           "Edit Table Description",
           br(),
 

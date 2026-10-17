@@ -533,4 +533,165 @@ function(input, output, session) {
       }
     )
   })
+
+  # ---------------------------------------------------------------------------
+  # Database diagram
+  # ---------------------------------------------------------------------------
+
+  diagram_selection <- reactiveVal(NULL)
+
+  observeEvent(input$diagram_scope, {
+    diagram_selection(NULL)
+  })
+
+  diagram_data <- reactive({
+    req(input$schema)
+    req(length(input$table) == 1L)
+
+    scope <- input$diagram_scope %||% "selected"
+
+    if (scope == "schema") {
+      tables <- load_diagram_tables(input$schema, "")
+      rels <- load_diagram_relationships(input$schema, "")
+      return(list(tables = tables, relationships = rels))
+    }
+
+    selected_table <- input$table
+    req(nzchar(selected_table))
+
+    all_tables <- load_diagram_tables(input$schema, "")
+    rels <- load_diagram_relationships(input$schema, "")
+
+    # 2-hop expansion from the selected table.
+    hop1 <- unique(c(
+      selected_table,
+      rels$table_name_1[rels$table_name_2 == selected_table],
+      rels$table_name_2[rels$table_name_1 == selected_table]
+    ))
+
+    hop2 <- unique(c(
+      hop1,
+      rels$table_name_1[rels$table_name_2 %in% hop1],
+      rels$table_name_2[rels$table_name_1 %in% hop1]
+    ))
+
+    tables <- all_tables[all_tables$table_name %in% hop2, , drop = FALSE]
+
+    rels <- rels[
+      rels$table_name_1 %in% hop2 & rels$table_name_2 %in% hop2,
+      ,
+      drop = FALSE
+    ]
+
+    list(tables = tables, relationships = rels)
+  })
+
+  output$database_diagram <- visNetwork::renderVisNetwork({
+    data <- diagram_data()
+
+    build_database_diagram(
+      data$tables,
+      data$relationships,
+      selected_table = if (identical(input$diagram_scope, "selected")) {
+        input$table
+      } else {
+        ""
+      }
+    )
+  })
+
+  output$diagram_selection_title <- renderText({
+    selected <- diagram_selection()
+
+    if (is.null(selected)) {
+      return("No diagram node selected.")
+    }
+
+    paste0(selected$schema_name, ".", selected$table_name)
+  })
+
+  output$diagram_selection_details <- renderText({
+    selected <- diagram_selection()
+
+    if (is.null(selected)) {
+      return("Click a table in the diagram to see details here.")
+    }
+
+    paste(
+      "Table:",
+      selected$table_name,
+      "\nDescription:",
+      selected$table_description,
+      "\nDeprecated:",
+      selected$deprecated
+    )
+  })
+
+  output$diagram_relationships_panel <- renderUI({
+    selected <- diagram_selection()
+
+    if (is.null(selected)) {
+      return(helpText("Select a table node to see join relationships."))
+    }
+
+    rels <- load_diagram_relationships(input$schema, "")
+
+    related <- rels[
+      rels$table_name_1 == selected$table_name |
+        rels$table_name_2 == selected$table_name,
+      ,
+      drop = FALSE
+    ]
+
+    if (nrow(related) == 0L) {
+      return(helpText("No join relationships found for this table."))
+    }
+
+    tags$ul(
+      lapply(seq_len(nrow(related)), function(i) {
+        rel <- related[i, , drop = FALSE]
+
+        tags$li(
+          HTML(paste0(
+            "<b>",
+            rel$table_name_1[[1]],
+            ".",
+            rel$field_name_1[[1]],
+            "</b> ",
+            "→ ",
+            "<b>",
+            rel$table_name_2[[1]],
+            ".",
+            rel$field_name_2[[1]],
+            "</b>",
+            "<br/>Join type: ",
+            rel$join_type_1to2[[1]]
+          ))
+        )
+      })
+    )
+  })
+
+  observeEvent(input$database_diagram_selected, {
+    sel <- input$database_diagram_selected
+
+    if (is.null(sel)) {
+      diagram_selection(NULL)
+      return()
+    }
+
+    selected_table_id <- sel[1]
+    selected_tables <- load_diagram_tables(input$schema, "")
+
+    match_row <- selected_tables[
+      paste0(selected_tables$schema_name, ".", selected_tables$table_name) ==
+        selected_table_id,
+      ,
+      drop = FALSE
+    ]
+
+    if (nrow(match_row) == 1L) {
+      diagram_selection(match_row)
+    }
+  })
 }
