@@ -42,6 +42,85 @@ fluidPage(
 
       tabsetPanel(
         tabPanel(
+          "Metadata Dashboard",
+          br(),
+
+          fluidRow(
+            column(
+              3,
+              checkboxInput(
+                "dash_include_deprecated",
+                "Include deprecated",
+                value = FALSE
+              )
+            ),
+            column(
+              3,
+              actionButton("dash_refresh", "Refresh")
+            ),
+            column(
+              6,
+              strong("Last refresh: "),
+              textOutput("dash_last_refresh", inline = TRUE)
+            )
+          ),
+
+          hr(),
+
+          fluidRow(
+            column(
+              3,
+              wellPanel(
+                h4("Active tables"),
+                h3(textOutput("dash_active_tables"))
+              )
+            ),
+            column(
+              3,
+              wellPanel(
+                h4("Tables documented"),
+                h3(textOutput("dash_tables_documented"))
+              )
+            ),
+            column(
+              3,
+              wellPanel(
+                h4("Fields documented"),
+                h3(textOutput("dash_fields_documented"))
+              )
+            ),
+            column(
+              3,
+              wellPanel(
+                h4("Relationships to review"),
+                h3(textOutput("dash_rels_review"))
+              )
+            )
+          ),
+
+          hr(),
+
+          h4("Schema comparison"),
+          tableOutput("dash_schema_summary"),
+
+          hr(),
+
+          h4("Needs attention"),
+          selectInput(
+            "dash_issue_filter",
+            "Filter",
+            choices = c(
+              "Missing table description",
+              "Missing field description",
+              "Missing how_populated",
+              "Relationship missing join_type"
+            ),
+            selected = "Missing field description"
+          ),
+          textOutput("dash_attention_count"),
+          DT::DTOutput("dash_attention_table")
+        ),
+        tabPanel(
           "Tables",
           br(),
           DT::DTOutput("tables")
@@ -81,19 +160,36 @@ fluidPage(
               8,
               helpText(
                 "Selected table shows the active table and its neighbors. ",
+                br(),
                 "Whole schema shows all tables and relationships in the selected schema."
               )
             )
           ),
 
+          # Full-width diagram
           fluidRow(
             column(
-              9,
-              visNetwork::visNetworkOutput("database_diagram", height = "720px")
-            ),
+              12,
+              visNetwork::visNetworkOutput("database_diagram", height = "760px")
+            )
+          ),
+
+          br(),
+
+          # Details moved to bottom
+          fluidRow(
             column(
-              3,
+              12,
               wellPanel(
+                style = paste(
+                  "max-height: 260px;",
+                  "overflow-y: auto;",
+                  "overflow-wrap: anywhere;"
+                ),
+                tabindex = "0",
+                role = "region",
+                `aria-label` = "Table and join details",
+
                 h4(textOutput("diagram_selection_title")),
                 verbatimTextOutput("diagram_selection_details"),
                 hr(),

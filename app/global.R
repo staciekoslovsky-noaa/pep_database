@@ -74,6 +74,60 @@ db_exec_one <- function(sql, params) {
 }
 
 # -----------------------------------------------------------------------------
+# Shared utility helpers
+# -----------------------------------------------------------------------------
+
+display_text <- function(x) {
+  result <- as.character(x)
+  result[is.na(result)] <- ""
+  result
+}
+
+same_metadata_value <- function(x, y) {
+  (is.na(x) & is.na(y)) | (!is.na(x) & !is.na(y) & x == y)
+}
+
+has_text <- function(x) {
+  !is.na(x) & nzchar(trimws(as.character(x)))
+}
+
+normalize_deprecated <- function(x) {
+  if (is.logical(x)) {
+    return(x)
+  }
+  if (is.numeric(x)) {
+    return(!is.na(x) & x != 0)
+  }
+
+  x <- tolower(trimws(as.character(x)))
+  ifelse(
+    x %in% c("true", "t", "1", "y", "yes"),
+    TRUE,
+    ifelse(
+      x %in% c("false", "f", "0", "n", "no"),
+      FALSE,
+      NA
+    )
+  )
+}
+
+filter_deprecated <- function(data, show_deprecated = FALSE) {
+  if (isTRUE(show_deprecated) || !"deprecated" %in% names(data)) {
+    return(data)
+  }
+
+  deprecated <- normalize_deprecated(data$deprecated)
+  data[is.na(deprecated) | !deprecated, , drop = FALSE]
+}
+
+coverage_text <- function(done, total) {
+  if (total == 0L) {
+    return("N/A")
+  }
+  paste0(round(100 * done / total), "% (", done, "/", total, ")")
+}
+
+# -----------------------------------------------------------------------------
 # Read-only browser queries
 # -----------------------------------------------------------------------------
 
@@ -133,6 +187,44 @@ WHERE schema_name = $1
   AND ($2 = '' OR table_name_1 = $2 OR table_name_2 = $2)
 ORDER BY table_name_1, table_name_2, field_name_1, id
 "
+
+dt_widget <- function(data) {
+  long_columns <- c(
+    "table_description",
+    "field_description",
+    "null_values",
+    "missing_values",
+    "allowed_values",
+    "column_default"
+  )
+
+  long_indexes <- which(names(data) %in% long_columns) - 1L
+  column_definitions <- list()
+
+  if (length(long_indexes)) {
+    column_definitions <- list(
+      list(width = "350px", targets = long_indexes)
+    )
+  }
+
+  DT::datatable(
+    data,
+    rownames = FALSE,
+    escape = TRUE,
+    filter = "top",
+    options = list(
+      pageLength = 25,
+      lengthMenu = c(15, 25, 50, 100),
+      scrollX = TRUE,
+      autoWidth = TRUE,
+      columnDefs = column_definitions
+    )
+  )
+}
+
+# -----------------------------------------------------------------------------
+# Lookup and validation helpers
+# -----------------------------------------------------------------------------
 
 SQL_HOW_POPULATED_LOOKUP <- "
 SELECT
@@ -231,12 +323,7 @@ save_table_description <- function(original, description) {
 # Field editor configuration
 # -----------------------------------------------------------------------------
 
-FIELD_KEYS <- c(
-  "id",
-  "schema_name",
-  "table_name",
-  "field_name"
-)
+FIELD_KEYS <- c("id", "schema_name", "table_name", "field_name")
 
 FIELD_TEXT <- c(
   "field_description",
@@ -294,17 +381,6 @@ load_field_metadata <- function(schema_name, table_name = "") {
   data
 }
 
-display_text <- function(x) {
-  result <- as.character(x)
-  result[is.na(result)] <- ""
-  result
-}
-
-same_metadata_value <- function(x, y) {
-  (is.na(x) & is.na(y)) |
-    (!is.na(x) & !is.na(y) & x == y)
-}
-
 changed_field_rows <- function(original, edited) {
   changed <- rep(FALSE, nrow(original))
 
@@ -319,12 +395,7 @@ changed_field_rows <- function(original, edited) {
 make_field_grid <- function(original, lookup) {
   codes <- original$how_populated_lku
 
-  if (
-    any(
-      !is.na(codes) &
-        !codes %in% lookup$how_populated_lku
-    )
-  ) {
+  if (any(!is.na(codes) & !codes %in% lookup$how_populated_lku)) {
     stop(
       "Some field records reference lookup codes that do not exist.",
       call. = FALSE
@@ -332,10 +403,10 @@ make_field_grid <- function(original, lookup) {
   }
 
   grid <- original
-  grid$how_populated <- lookup$how_populated[
-    match(codes, lookup$how_populated_lku)
-  ]
-
+  grid$how_populated <- lookup$how_populated[match(
+    codes,
+    lookup$how_populated_lku
+  )]
   grid$how_populated_lku <- NULL
   grid[] <- lapply(grid, display_text)
   grid
@@ -358,7 +429,6 @@ decode_field_grid <- function(grid, original, lookup) {
   grid[] <- lapply(grid, display_text)
 
   readonly <- setdiff(names(expected), FIELD_GRID_EDITABLE)
-
   for (column in readonly) {
     if (!identical(grid[[column]], expected[[column]])) {
       stop(
@@ -371,17 +441,8 @@ decode_field_grid <- function(grid, original, lookup) {
   }
 
   labels <- grid$how_populated
-
-  if (
-    any(
-      nzchar(labels) &
-        !labels %in% lookup$how_populated
-    )
-  ) {
-    stop(
-      "Choose how_populated values from the dropdown.",
-      call. = FALSE
-    )
+  if (any(nzchar(labels) & !labels %in% lookup$how_populated)) {
+    stop("Choose how_populated values from the dropdown.", call. = FALSE)
   }
 
   edited <- original
@@ -392,12 +453,14 @@ decode_field_grid <- function(grid, original, lookup) {
     edited[[column]] <- value
   }
 
-  edited$how_populated_lku <- lookup$how_populated_lku[
-    match(labels, lookup$how_populated)
-  ]
-  edited$how_populated <- lookup$how_populated[
-    match(labels, lookup$how_populated)
-  ]
+  edited$how_populated_lku <- lookup$how_populated_lku[match(
+    labels,
+    lookup$how_populated
+  )]
+  edited$how_populated <- lookup$how_populated[match(
+    labels,
+    lookup$how_populated
+  )]
 
   edited
 }
@@ -482,29 +545,21 @@ save_field_metadata <- function(original, edited) {
   }
 
   rows <- changed_field_rows(original, edited)
-
   if (!length(rows)) {
     return(0L)
   }
 
   with_db(function(con) {
-    quote_column <- function(x) {
-      as.character(DBI::dbQuoteIdentifier(con, x))
-    }
+    quote_column <- function(x) as.character(DBI::dbQuoteIdentifier(con, x))
 
     DBI::dbWithTransaction(con, {
-      lookup <- validate_how_lookup(
-        DBI::dbGetQuery(con, SQL_HOW_POPULATED_LOOKUP)
-      )
-
+      lookup <- validate_how_lookup(DBI::dbGetQuery(
+        con,
+        SQL_HOW_POPULATED_LOOKUP
+      ))
       codes <- edited$how_populated_lku[rows]
 
-      if (
-        any(
-          !is.na(codes) &
-            !codes %in% lookup$how_populated_lku
-        )
-      ) {
+      if (any(!is.na(codes) & !codes %in% lookup$how_populated_lku)) {
         stop(
           "A lookup code is no longer valid. Reload the editor.",
           call. = FALSE
@@ -561,8 +616,7 @@ save_field_metadata <- function(original, edited) {
           stop(
             "Record ",
             original$id[row],
-            " changed, was removed, or is not writable. ",
-            "Reload before retrying.",
+            " changed, was removed, or is not writable. Reload before retrying.",
             call. = FALSE
           )
         }
@@ -572,78 +626,6 @@ save_field_metadata <- function(original, edited) {
     length(rows)
   })
 }
-
-# -----------------------------------------------------------------------------
-# Browser display helpers
-# -----------------------------------------------------------------------------
-
-normalize_deprecated <- function(x) {
-  if (is.logical(x)) {
-    return(x)
-  }
-  if (is.numeric(x)) {
-    return(!is.na(x) & x != 0)
-  }
-
-  x <- tolower(trimws(as.character(x)))
-  ifelse(
-    x %in% c("true", "t", "1", "y", "yes"),
-    TRUE,
-    ifelse(
-      x %in% c("false", "f", "0", "n", "no"),
-      FALSE,
-      NA
-    )
-  )
-}
-
-filter_deprecated <- function(data, show_deprecated = FALSE) {
-  if (isTRUE(show_deprecated) || !"deprecated" %in% names(data)) {
-    return(data)
-  }
-
-  deprecated <- normalize_deprecated(data$deprecated)
-  data[is.na(deprecated) | !deprecated, , drop = FALSE]
-}
-
-dt_widget <- function(data) {
-  long_columns <- c(
-    "table_description",
-    "field_description",
-    "null_values",
-    "missing_values",
-    "allowed_values",
-    "column_default"
-  )
-
-  long_indexes <- which(names(data) %in% long_columns) - 1L
-
-  column_definitions <- list()
-
-  if (length(long_indexes)) {
-    column_definitions <- list(
-      list(
-        width = "350px",
-        targets = long_indexes
-      )
-    )
-  }
-
-  DT::datatable(
-    data,
-    rownames = FALSE,
-    escape = TRUE,
-    filter = "top",
-    options = list(
-      pageLength = 15,
-      lengthMenu = c(15, 25, 50, 100),
-      scrollX = TRUE,
-      autoWidth = TRUE,
-      columnDefs = column_definitions
-    )
-  )
-}
-
 
 # -----------------------------------------------------------------------------
 # Database diagram helpers
@@ -674,11 +656,7 @@ SELECT
   deprecated
 FROM database_meta.data4app_fk
 WHERE schema_name = $1
-  AND (
-    $2 = ''
-    OR table_name_1 = $2
-    OR table_name_2 = $2
-  )
+  AND ($2 = '' OR table_name_1 = $2 OR table_name_2 = $2)
 ORDER BY table_name_1, table_name_2, field_name_1, id
 "
 
@@ -708,66 +686,29 @@ join_arrow <- function(join_type) {
   list(from = "table_name_1", to = "table_name_2", label = "INNER")
 }
 
-table_relationship_summary <- function(table_name, relationships) {
-  if (nrow(relationships) == 0L) {
-    return(character(0))
-  }
-
-  hits_1 <- relationships[
-    relationships$table_name_1 == table_name,
-    ,
-    drop = FALSE
-  ]
-  hits_2 <- relationships[
-    relationships$table_name_2 == table_name,
-    ,
-    drop = FALSE
-  ]
-
-  fields_1 <- if (nrow(hits_1)) {
-    paste0(hits_1$field_name_1, " → ", hits_1$field_name_2)
-  } else {
-    character(0)
-  }
-
-  fields_2 <- if (nrow(hits_2)) {
-    paste0(hits_2$field_name_2, " → ", hits_2$field_name_1)
-  } else {
-    character(0)
-  }
-
-  unique(c(fields_1, fields_2))
-}
-
-diagram_node_label <- function(schema_name, table_name, relationships) {
-  same_schema <- relationships$schema_name %in% schema_name
-
+build_diagram_node_label <- function(table_name, relationships_for_view) {
   fields <- unique(c(
-    relationships$field_name_1[
-      same_schema & relationships$table_name_1 %in% table_name
+    relationships_for_view$field_name_1[
+      relationships_for_view$table_name_1 == table_name
     ],
-    relationships$field_name_2[
-      same_schema & relationships$table_name_2 %in% table_name
+    relationships_for_view$field_name_2[
+      relationships_for_view$table_name_2 == table_name
     ]
   ))
 
   fields <- as.character(fields)
-  fields <- sort(fields[!is.na(fields) & nzchar(trimws(fields))])
+  fields <- fields[!is.na(fields) & nzchar(trimws(fields))]
 
-  # Escape metadata before using the label's limited HTML formatting.
-  escape_label <- function(x) {
-    as.character(htmltools::htmlEscape(x))
+  heading <- paste0("<b>", htmltools::htmlEscape(table_name), "</b>")
+
+  if (!length(fields)) {
+    return(heading)
   }
 
-  heading <- paste0("<b>", escape_label(table_name), "</b>")
-
-  body <- if (length(fields)) {
-    escape_label(fields)
-  } else {
-    "(no joins in this view)"
-  }
-
-  paste(c(heading, "", body), collapse = "\n")
+  paste(
+    c(heading, "", htmltools::htmlEscape(sort(unique(fields)))),
+    collapse = "\n"
+  )
 }
 
 build_database_diagram <- function(tables, relationships, selected_table = "") {
@@ -780,48 +721,17 @@ build_database_diagram <- function(tables, relationships, selected_table = "") {
     )
   }
 
-  diagram_node_label <- function(table_name, relationships_for_table) {
-    fields <- unique(c(
-      relationships_for_table$field_name_1[
-        relationships_for_table$table_name_1 == table_name
-      ],
-      relationships_for_table$field_name_2[
-        relationships_for_table$table_name_2 == table_name
-      ]
-    ))
-
-    fields <- fields[!is.na(fields) & nzchar(trimws(fields))]
-
-    if (length(fields) == 0L) {
-      return(paste0("<b>", htmltools::htmlEscape(table_name), "</b>"))
-    }
-
-    paste(
-      c(
-        paste0("<b>", htmltools::htmlEscape(table_name), "</b>"),
-        "",
-        htmltools::htmlEscape(sort(unique(fields)))
-      ),
-      collapse = "\n"
-    )
-  }
-
   nodes <- data.frame(
     id = paste0(tables$schema_name, ".", tables$table_name),
     label = vapply(
       tables$table_name,
-      function(tbl) diagram_node_label(tbl, relationships),
+      function(tbl) build_diagram_node_label(tbl, relationships),
       character(1)
     ),
     title = ifelse(
       is.na(tables$table_description) | !nzchar(tables$table_description),
       paste0("<b>", tables$table_name, "</b>"),
-      paste0(
-        "<b>",
-        tables$table_name,
-        "</b><br/>",
-        tables$table_description
-      )
+      paste0("<b>", tables$table_name, "</b><br/>", tables$table_description)
     ),
     group = tables$schema_name,
     shape = "box",
@@ -854,60 +764,53 @@ build_database_diagram <- function(tables, relationships, selected_table = "") {
 
   nodes$opacity <- ifelse(nodes$id %in% related_ids, 1, 0.25)
 
-  if (nrow(relationships) > 0L) {
-    edges_list <- lapply(seq_len(nrow(relationships)), function(i) {
-      rel <- relationships[i, , drop = FALSE]
-      arrow <- join_arrow(rel$join_type_1to2)
+  edges <- if (nrow(relationships) > 0L) {
+    do.call(
+      rbind,
+      lapply(seq_len(nrow(relationships)), function(i) {
+        rel <- relationships[i, , drop = FALSE]
+        arrow <- join_arrow(rel$join_type_1to2)
 
-      from_tbl <- rel[[arrow$from]][1]
-      to_tbl <- rel[[arrow$to]][1]
+        from_tbl <- rel[[arrow$from]][1]
+        to_tbl <- rel[[arrow$to]][1]
 
-      data.frame(
-        from = paste0(rel$schema_name[[1]], ".", from_tbl),
-        to = paste0(rel$schema_name[[1]], ".", to_tbl),
-        title = paste0(
-          "<b>",
-          rel$table_name_1[[1]],
-          ".",
-          rel$field_name_1[[1]],
-          "</b><br/>",
-          "→ ",
-          "<b>",
-          rel$table_name_2[[1]],
-          ".",
-          rel$field_name_2[[1]],
-          "</b><br/>",
-          "Join type: ",
-          rel$join_type_1to2[[1]]
-        ),
-        arrows = "to",
-        stringsAsFactors = FALSE
-      )
-    })
-
-    edges <- do.call(rbind, edges_list)
+        data.frame(
+          from = paste0(rel$schema_name[[1]], ".", from_tbl),
+          to = paste0(rel$schema_name[[1]], ".", to_tbl),
+          title = paste0(
+            "<b>",
+            rel$table_name_1[[1]],
+            ".",
+            rel$field_name_1[[1]],
+            "</b><br/>",
+            "→ ",
+            "<b>",
+            rel$table_name_2[[1]],
+            ".",
+            rel$field_name_2[[1]],
+            "</b><br/>",
+            "Join type: ",
+            rel$join_type_1to2[[1]]
+          ),
+          arrows = "to",
+          stringsAsFactors = FALSE
+        )
+      })
+    )
   } else {
-    edges <- data.frame(from = character(0), to = character(0))
+    data.frame(from = character(0), to = character(0))
   }
 
   visNetwork::visNetwork(nodes, edges) |>
     visNetwork::visNodes(
       shape = "box",
-      margin = list(
-        top = 12,
-        right = 16,
-        bottom = 12,
-        left = 16
-      ),
+      margin = list(top = 12, right = 16, bottom = 12, left = 16),
       font = list(
         face = "Arial",
         size = 14,
         align = "left",
         multi = "html",
-        bold = list(
-          face = "Arial",
-          size = 18
-        )
+        bold = list(face = "Arial", size = 18)
       ),
       labelHighlightBold = FALSE
     ) |>
@@ -918,9 +821,7 @@ build_database_diagram <- function(tables, relationships, selected_table = "") {
       width = 1.5
     ) |>
     visNetwork::visOptions(
-      highlightNearest = list(enabled = TRUE, degree = 1),
-      nodesIdSelection = TRUE,
-      selectedBy = "group"
+      highlightNearest = list(enabled = TRUE, degree = 1)
     ) |>
     visNetwork::visPhysics(
       stabilization = TRUE,
@@ -932,4 +833,55 @@ build_database_diagram <- function(tables, relationships, selected_table = "") {
       )
     ) |>
     visNetwork::visLayout(randomSeed = 42)
+}
+
+# -----------------------------------------------------------------------------
+# Metadata dashboard queries and loaders
+# -----------------------------------------------------------------------------
+
+SQL_DASH_TABLES <- "
+SELECT
+  schema_name,
+  table_name,
+  table_description,
+  deprecated
+FROM database_meta.data4app_tables
+ORDER BY schema_name, table_name
+"
+
+SQL_DASH_FIELDS <- "
+SELECT
+  schema_name,
+  table_name,
+  field_name,
+  field_description,
+  how_populated_lku,
+  deprecated
+FROM database_meta.data4app_fields
+ORDER BY schema_name, table_name, field_name
+"
+
+SQL_DASH_RELATIONSHIPS <- "
+SELECT
+  schema_name,
+  table_name_1,
+  field_name_1,
+  table_name_2,
+  field_name_2,
+  join_type_1to2,
+  deprecated
+FROM database_meta.data4app_fk
+ORDER BY schema_name, table_name_1, table_name_2, field_name_1, field_name_2
+"
+
+load_dashboard_tables <- function() {
+  db_query(SQL_DASH_TABLES, NULL)
+}
+
+load_dashboard_fields <- function() {
+  db_query(SQL_DASH_FIELDS, NULL)
+}
+
+load_dashboard_relationships <- function() {
+  db_query(SQL_DASH_RELATIONSHIPS, NULL)
 }

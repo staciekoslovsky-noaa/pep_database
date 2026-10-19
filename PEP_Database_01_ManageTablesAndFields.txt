@@ -1,11 +1,11 @@
 --To auto-populate tbl_table_descriptions and tbl_field_descriptions
 
-INSERT INTO database_meta.tbl_table_descriptions (schema_name, table_name)
-SELECT table_schema, table_name
+INSERT INTO database_meta.tbl_table_descriptions (schema_name, table_name, deprecated)
+SELECT table_schema, table_name, FALSE
 FROM information_schema.tables 
 WHERE table_type = 'BASE TABLE' 
 AND table_schema <> 'pg_catalog' AND table_schema <> 'information_schema' AND table_schema <> 'public'
-AND table_name NOT IN (SELECT table_name FROM database_meta.tbl_table_descriptions);
+AND (table_schema, table_name) NOT IN (SELECT schema_name, table_name FROM database_meta.tbl_table_descriptions);
 
 UPDATE database_meta.tbl_table_descriptions
 SET deprecated = TRUE
@@ -14,8 +14,8 @@ FROM information_schema.tables
 WHERE table_type = 'BASE TABLE' 
 AND table_schema <> 'pg_catalog' AND table_schema <> 'information_schema' AND table_schema <> 'public');
 
-INSERT INTO database_meta.tbl_field_descriptions (schema_name, table_name, field_name)
-SELECT table_schema, table_name, column_name
+INSERT INTO database_meta.tbl_field_descriptions (schema_name, table_name, field_name, deprecated)
+SELECT table_schema, table_name, column_name, FALSE
 FROM information_schema.columns 
 WHERE table_schema <> 'pg_catalog' AND table_schema <> 'information_schema' AND table_schema <> 'public'
 AND (table_schema, table_name, column_name) NOT IN (SELECT schema_name, table_name, field_name FROM database_meta.tbl_field_descriptions);
