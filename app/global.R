@@ -275,9 +275,10 @@ SELECT
   f.field_alias,
   f.field_description,
   f.field_format,
+  f.allowed_values,
   f.null_values,
   f.missing_values,
-  f.allowed_values,
+  f.example_values,
   f.how_populated,
   f.units,
   f.deprecated,
@@ -313,9 +314,10 @@ dt_widget <- function(data) {
     "table_description",
     "field_description",
     "how_populated",
+    "allowed_values",
     "null_values",
     "missing_values",
-    "allowed_values",
+    "example_values",
     "column_default"
   )
 
@@ -334,7 +336,7 @@ dt_widget <- function(data) {
     escape = TRUE,
     filter = "top",
     options = list(
-      pageLength = 25,
+      pageLength = 15,
       lengthMenu = c(15, 25, 50, 100),
       scrollX = TRUE,
       autoWidth = TRUE,
@@ -580,9 +582,10 @@ FIELD_TEXT <- c(
   "field_description",
   "field_alias",
   "field_format",
+  "allowed_values",
   "null_values",
   "missing_values",
-  "allowed_values",
+  "example_values",
   "how_populated",
   "units"
 )
@@ -602,12 +605,13 @@ SELECT
   f.allowed_values,
   f.null_values,
   f.missing_values,
+  f.example_values,
   f.how_populated,
   f.units
 FROM database_meta.tbl_field_descriptions f
 WHERE f.schema_name = $1
   AND ($2 = '' OR f.table_name = $2)
-ORDER BY f.table_name
+ORDER BY f.table_name, f.field_name
 "
 
 load_field_metadata <- function(schema_name, table_name = "") {
@@ -725,9 +729,10 @@ field_editor_hotable <- function(grid) {
     field_description = 320,
     field_alias = 220,
     field_format = 220,
+    allowed_values = 280,
     null_values = 280,
     missing_values = 280,
-    allowed_values = 280,
+    example_values = 280,
     how_populated = 150,
     units = 75
   )

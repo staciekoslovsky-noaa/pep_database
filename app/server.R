@@ -819,8 +819,8 @@ function(input, output, session) {
         selection = "none",
         class = "stripe hover compact",
         options = list(
-          pageLength = 25,
-          lengthMenu = c(10, 25, 50, 100),
+          pageLength = 15,
+          lengthMenu = c(15, 25, 50, 100),
           order = ord,
           autoWidth = TRUE,
           scrollX = TRUE
