@@ -35,6 +35,132 @@ db_query <- function(sql, params = NULL) {
   })
 }
 
+download_table_csv <- function(schema_name, table_name, row_mode, file) {
+  if (
+    length(schema_name) != 1L ||
+      is.na(schema_name) ||
+      !nzchar(schema_name) ||
+      length(table_name) != 1L ||
+      is.na(table_name) ||
+      !nzchar(table_name)
+  ) {
+    stop("Select a schema and a specific table.", call. = FALSE)
+  }
+
+  if (!row_mode %in% c("all", "sample")) {
+    stop("Choose all rows or a sample.", call. = FALSE)
+  }
+
+  with_db(function(con) {
+    table_id <- as.character(DBI::dbQuoteIdentifier(
+      con,
+      DBI::Id(schema = schema_name, table = table_name)
+    ))
+
+    if (row_mode == "all") {
+      sql <- paste("SELECT * FROM", table_id)
+    } else {
+      stats <- DBI::dbGetQuery(
+        con,
+        "
+        SELECT c.reltuples::double precision AS estimated_rows
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = $1
+          AND c.relname = $2
+          AND c.relkind IN ('r', 'p')
+        ",
+        params = list(schema_name, table_name)
+      )
+
+      estimate <- if (nrow(stats)) {
+        as.numeric(stats$estimated_rows[[1]])
+      } else {
+        NA_real_
+      }
+
+      if (is.finite(estimate) && estimate >= 0 && estimate <= 100000) {
+        sql <- paste("SELECT * FROM", table_id, "ORDER BY random() LIMIT 500")
+      } else {
+        percent <- if (is.finite(estimate) && estimate > 0) {
+          min(100, max(0.1, 200000 / estimate))
+        } else {
+          1
+        }
+
+        sql <- paste0(
+          "SELECT * FROM ",
+          table_id,
+          " TABLESAMPLE SYSTEM (",
+          format(percent, digits = 8, scientific = FALSE, trim = TRUE),
+          ") LIMIT 500"
+        )
+      }
+    }
+
+    result <- DBI::dbSendQuery(con, sql)
+    on.exit(DBI::dbClearResult(result), add = TRUE)
+
+    column_names <- DBI::dbColumnInfo(result)$name
+    first_chunk <- TRUE
+
+    repeat {
+      chunk <- DBI::dbFetch(result, n = 1000L)
+      if (!nrow(chunk)) {
+        break
+      }
+
+      # Convert database array/list columns to text so they can be represented in CSV.
+      chunk[] <- lapply(chunk, function(column) {
+        if (is.list(column)) {
+          vapply(
+            column,
+            function(value) paste(capture.output(dput(value)), collapse = ""),
+            character(1)
+          )
+        } else {
+          column
+        }
+      })
+
+      write.table(
+        chunk,
+        file = file,
+        sep = ",",
+        row.names = FALSE,
+        col.names = first_chunk,
+        append = !first_chunk,
+        na = "",
+        qmethod = "double",
+        fileEncoding = "UTF-8"
+      )
+
+      first_chunk <- FALSE
+    }
+
+    if (first_chunk) {
+      empty <- as.data.frame(
+        setNames(
+          replicate(length(column_names), character(0), simplify = FALSE),
+          column_names
+        ),
+        check.names = FALSE
+      )
+
+      write.table(
+        empty,
+        file = file,
+        sep = ",",
+        row.names = FALSE,
+        col.names = TRUE,
+        na = "",
+        qmethod = "double",
+        fileEncoding = "UTF-8"
+      )
+    }
+  })
+}
+
 db_fetch_one <- function(sql, params = NULL) {
   result <- db_query(sql, params)
 
@@ -133,7 +259,6 @@ coverage_text <- function(done, total) {
 
 SQL_TABLES <- "
 SELECT
-  id,
   schema_name,
   table_name,
   table_description,
@@ -144,18 +269,16 @@ ORDER BY schema_name, table_name, id
 
 SQL_FIELDS <- "
 SELECT
-  f.id,
   f.schema_name,
   f.table_name,
   f.field_name,
-  f.field_description,
   f.field_alias,
+  f.field_description,
   f.field_format,
   f.null_values,
   f.missing_values,
   f.allowed_values,
-  f.how_populated_lku,
-  l.how_populated,
+  f.how_populated,
   f.units,
   f.deprecated,
   f.data_type,
@@ -165,16 +288,13 @@ SELECT
   f.column_default,
   f.ordinal_position
 FROM database_meta.data4app_fields f
-LEFT JOIN database_meta.lku_how_populated l
-  ON l.how_populated_lku = f.how_populated_lku
 WHERE f.schema_name = $1
   AND ($2 = '' OR f.table_name = $2)
-ORDER BY f.table_name, f.ordinal_position, f.field_name, f.id
+ORDER BY f.table_name, f.ordinal_position, f.field_name
 "
 
 SQL_FK <- "
 SELECT
-  id,
   schema_name,
   table_name_1,
   field_name_1,
@@ -192,6 +312,7 @@ dt_widget <- function(data) {
   long_columns <- c(
     "table_description",
     "field_description",
+    "how_populated",
     "null_values",
     "missing_values",
     "allowed_values",
@@ -226,56 +347,58 @@ dt_widget <- function(data) {
 # Lookup and validation helpers
 # -----------------------------------------------------------------------------
 
-SQL_HOW_POPULATED_LOOKUP <- "
-SELECT
-  how_populated_lku::text AS how_populated_lku,
-  how_populated
-FROM database_meta.lku_how_populated
-ORDER BY how_populated
-"
+# SQL_HOW_POPULATED_LOOKUP <- "
+# SELECT
+#   how_populated_lku::text AS how_populated_lku,
+#   how_populated
+# FROM database_meta.lku_how_populated
+# ORDER BY how_populated
+# "
 
-validate_how_lookup <- function(data) {
-  required <- c("how_populated_lku", "how_populated")
+# validate_how_lookup <- function(data) {
+#   required <- c("how_populated_lku", "how_populated")
 
-  if (!all(required %in% names(data))) {
-    stop(
-      "Lookup must contain how_populated_lku and how_populated.",
-      call. = FALSE
-    )
-  }
+#   if (!all(required %in% names(data))) {
+#     stop(
+#       "Lookup must contain how_populated_lku and how_populated.",
+#       call. = FALSE
+#     )
+#   }
 
-  data$how_populated_lku <- as.character(data$how_populated_lku)
-  data$how_populated <- as.character(data$how_populated)
+# data$how_populated_lku <- as.character(data$how_populated_lku)
+#   data$how_populated <- as.character(data$how_populated)
 
-  if (
-    anyNA(data$how_populated_lku) ||
-      anyDuplicated(data$how_populated_lku) ||
-      anyNA(data$how_populated) ||
-      any(!nzchar(trimws(data$how_populated))) ||
-      anyDuplicated(data$how_populated)
-  ) {
-    stop(
-      paste(
-        "Lookup codes and descriptions must be unique and non-missing.",
-        "Descriptions must not be blank."
-      ),
-      call. = FALSE
-    )
-  }
+#   if (
+#     anyNA(data$how_populated_lku) ||
+#       anyDuplicated(data$how_populated_lku) ||
+#       anyNA(data$how_populated) ||
+#       any(!nzchar(trimws(data$how_populated))) ||
+#       anyDuplicated(data$how_populated)
+#   ) {
+#     stop(
+#       paste(
+#         "Lookup codes and descriptions must be unique and non-missing.",
+#         "Descriptions must not be blank."
+#       ),
+#       call. = FALSE
+#     )
+#   }
 
-  data
-}
+#   data
+# }
 
-load_how_populated_lookup <- function() {
-  validate_how_lookup(db_query(SQL_HOW_POPULATED_LOOKUP))
-}
+# load_how_populated_lookup <- function() {
+#   validate_how_lookup(db_query(SQL_HOW_POPULATED_LOOKUP))
+# }
 
 # -----------------------------------------------------------------------------
 # Table-description editing
 # -----------------------------------------------------------------------------
 
-load_table_description <- function(schema_name, table_name) {
-  db_fetch_one(
+TABLE_KEYS <- c("id", "schema_name", "table_name")
+
+load_table_metadata <- function(schema_name) {
+  data <- db_query(
     "
     SELECT
       id::text AS id,
@@ -284,39 +407,167 @@ load_table_description <- function(schema_name, table_name) {
       table_description
     FROM database_meta.tbl_table_descriptions
     WHERE schema_name = $1
-      AND table_name = $2
+    ORDER BY table_name, id
     ",
-    list(schema_name, table_name)
+    list(schema_name)
+  )
+
+  if (anyNA(data$id) || anyDuplicated(data$id)) {
+    stop("Table metadata IDs must be unique and non-missing.", call. = FALSE)
+  }
+
+  data
+}
+
+make_table_grid <- function(original) {
+  grid <- original
+  grid[] <- lapply(grid, display_text)
+  grid
+}
+
+decode_table_grid <- function(grid, original) {
+  expected <- make_table_grid(original)
+
+  if (
+    !is.data.frame(grid) ||
+      !identical(names(grid), names(expected)) ||
+      nrow(grid) != nrow(expected)
+  ) {
+    stop(
+      "Rows or columns changed unexpectedly. Discard edits and reload.",
+      call. = FALSE
+    )
+  }
+
+  grid[] <- lapply(grid, display_text)
+
+  for (column in TABLE_KEYS) {
+    if (!identical(grid[[column]], expected[[column]])) {
+      stop(
+        "A read-only column changed: ",
+        column,
+        ". Discard edits and reload.",
+        call. = FALSE
+      )
+    }
+  }
+
+  edited <- original
+  description <- grid$table_description
+
+  description[
+    is.na(original$table_description) & description == ""
+  ] <- NA_character_
+
+  edited$table_description <- description
+  edited
+}
+
+changed_table_rows <- function(original, edited) {
+  which(
+    !same_metadata_value(
+      original$table_description,
+      edited$table_description
+    )
   )
 }
 
-save_table_description <- function(original, description) {
-  if (
-    !is.data.frame(original) ||
-      nrow(original) != 1L ||
-      !is.character(description) ||
-      length(description) != 1L
-  ) {
-    stop("Invalid loaded record or description.", call. = FALSE)
+table_editor_hotable <- function(grid) {
+  hot <- rhandsontable::rhandsontable(
+    grid,
+    rowHeaders = TRUE,
+    height = 650,
+    useTypes = TRUE,
+    contextMenu = FALSE,
+    minSpareRows = 0,
+    allowInsertRow = FALSE,
+    allowRemoveRow = FALSE,
+    allowInsertColumn = FALSE,
+    allowRemoveColumn = FALSE,
+    manualRowMove = FALSE,
+    manualColumnMove = FALSE,
+    columnSorting = FALSE,
+    colWidths = c(80, 160, 240, 650),
+    rowHeights = 60,
+    wordWrap = TRUE,
+    autoRowSize = TRUE,
+    manualColumnResize = TRUE,
+    manualRowResize = TRUE,
+    stretchH = "none"
+  )
+
+  for (column in names(grid)) {
+    hot <- rhandsontable::hot_col(
+      hot,
+      column,
+      type = "text",
+      wordWrap = TRUE,
+      readOnly = column != "table_description"
+    )
   }
 
-  db_exec_one(
-    "
-    UPDATE database_meta.tbl_table_descriptions
-    SET table_description = $1
-    WHERE id = $2
-      AND schema_name IS NOT DISTINCT FROM $3
-      AND table_name IS NOT DISTINCT FROM $4
-      AND table_description IS NOT DISTINCT FROM $5
-    ",
-    list(
-      description,
-      original$id[[1]],
-      original$schema_name[[1]],
-      original$table_name[[1]],
-      original$table_description[[1]]
-    )
-  )
+  hot
+}
+
+save_table_metadata <- function(original, edited) {
+  required <- c(TABLE_KEYS, "table_description")
+
+  if (
+    !is.data.frame(original) ||
+      !is.data.frame(edited) ||
+      !all(required %in% names(original)) ||
+      !identical(names(original), names(edited)) ||
+      nrow(original) != nrow(edited) ||
+      !identical(original[TABLE_KEYS], edited[TABLE_KEYS]) ||
+      anyNA(original$id) ||
+      anyDuplicated(original$id) ||
+      !is.character(edited$table_description)
+  ) {
+    stop("Invalid editing dataset. Discard edits and reload.", call. = FALSE)
+  }
+
+  rows <- changed_table_rows(original, edited)
+
+  if (!length(rows)) {
+    return(0L)
+  }
+
+  with_db(function(con) {
+    DBI::dbWithTransaction(con, {
+      for (row in rows) {
+        affected <- DBI::dbExecute(
+          con,
+          "
+          UPDATE database_meta.tbl_table_descriptions
+          SET table_description = $1
+          WHERE id = $2
+            AND schema_name IS NOT DISTINCT FROM $3
+            AND table_name IS NOT DISTINCT FROM $4
+            AND table_description IS NOT DISTINCT FROM $5
+          ",
+          params = list(
+            edited$table_description[[row]],
+            original$id[[row]],
+            original$schema_name[[row]],
+            original$table_name[[row]],
+            original$table_description[[row]]
+          )
+        )
+
+        if (affected != 1L) {
+          stop(
+            "Record ",
+            original$id[[row]],
+            " changed, was removed, or is not writable. ",
+            "No descriptions were saved. Reload before retrying.",
+            call. = FALSE
+          )
+        }
+      }
+    })
+
+    length(rows)
+  })
 }
 
 # -----------------------------------------------------------------------------
@@ -332,11 +583,12 @@ FIELD_TEXT <- c(
   "null_values",
   "missing_values",
   "allowed_values",
+  "how_populated",
   "units"
 )
 
-FIELD_EDITABLE <- c(FIELD_TEXT, "how_populated_lku")
-FIELD_GRID_EDITABLE <- c(FIELD_TEXT, "how_populated")
+FIELD_EDITABLE <- FIELD_TEXT
+FIELD_GRID_EDITABLE <- FIELD_TEXT
 
 SQL_FIELD_EDIT <- "
 SELECT
@@ -344,21 +596,18 @@ SELECT
   f.schema_name,
   f.table_name,
   f.field_name,
-  f.field_description,
   f.field_alias,
+  f.field_description,
   f.field_format,
+  f.allowed_values,
   f.null_values,
   f.missing_values,
-  f.allowed_values,
-  f.how_populated_lku::text AS how_populated_lku,
-  l.how_populated,
+  f.how_populated,
   f.units
 FROM database_meta.tbl_field_descriptions f
-LEFT JOIN database_meta.lku_how_populated l
-  ON l.how_populated_lku = f.how_populated_lku
 WHERE f.schema_name = $1
   AND ($2 = '' OR f.table_name = $2)
-ORDER BY f.table_name, f.field_name, f.id
+ORDER BY f.table_name
 "
 
 load_field_metadata <- function(schema_name, table_name = "") {
@@ -366,7 +615,7 @@ load_field_metadata <- function(schema_name, table_name = "") {
 
   if (anyNA(data$id) || anyDuplicated(data$id)) {
     stop(
-      "Field IDs must be unique. Check metadata and lookup keys.",
+      "Field IDs must be unique. Check metadata.",
       call. = FALSE
     )
   }
@@ -392,28 +641,28 @@ changed_field_rows <- function(original, edited) {
   which(changed)
 }
 
-make_field_grid <- function(original, lookup) {
-  codes <- original$how_populated_lku
+make_field_grid <- function(original) {
+  # codes <- original$how_populated_lku
 
-  if (any(!is.na(codes) & !codes %in% lookup$how_populated_lku)) {
-    stop(
-      "Some field records reference lookup codes that do not exist.",
-      call. = FALSE
-    )
-  }
+  # if (any(!is.na(codes) & !codes %in% lookup$how_populated_lku)) {
+  #   stop(
+  #     "Some field records reference lookup codes that do not exist.",
+  #     call. = FALSE
+  #   )
+  # }
 
   grid <- original
-  grid$how_populated <- lookup$how_populated[match(
-    codes,
-    lookup$how_populated_lku
-  )]
-  grid$how_populated_lku <- NULL
+  # grid$how_populated <- lookup$how_populated[match(
+  #   codes,
+  #   lookup$how_populated_lku
+  # )]
+  # grid$how_populated_lku <- NULL
   grid[] <- lapply(grid, display_text)
   grid
 }
 
-decode_field_grid <- function(grid, original, lookup) {
-  expected <- make_field_grid(original, lookup)
+decode_field_grid <- function(grid, original) {
+  expected <- make_field_grid(original)
 
   if (
     !is.data.frame(grid) ||
@@ -440,10 +689,10 @@ decode_field_grid <- function(grid, original, lookup) {
     }
   }
 
-  labels <- grid$how_populated
-  if (any(nzchar(labels) & !labels %in% lookup$how_populated)) {
-    stop("Choose how_populated values from the dropdown.", call. = FALSE)
-  }
+  # labels <- grid$how_populated
+  # if (any(nzchar(labels) & !labels %in% lookup$how_populated)) {
+  #   stop("Choose how_populated values from the dropdown.", call. = FALSE)
+  # }
 
   edited <- original
 
@@ -453,19 +702,19 @@ decode_field_grid <- function(grid, original, lookup) {
     edited[[column]] <- value
   }
 
-  edited$how_populated_lku <- lookup$how_populated_lku[match(
-    labels,
-    lookup$how_populated
-  )]
-  edited$how_populated <- lookup$how_populated[match(
-    labels,
-    lookup$how_populated
-  )]
+  # edited$how_populated_lku <- lookup$how_populated_lku[match(
+  #   labels,
+  #   lookup$how_populated
+  # )]
+  # edited$how_populated <- lookup$how_populated[match(
+  #   labels,
+  #   lookup$how_populated
+  # )]
 
   edited
 }
 
-field_editor_hotable <- function(grid, lookup) {
+field_editor_hotable <- function(grid) {
   widths <- stats::setNames(rep(160, ncol(grid)), names(grid))
 
   preferred_widths <- c(
@@ -519,16 +768,18 @@ field_editor_hotable <- function(grid, lookup) {
     )
   }
 
-  rhandsontable::hot_col(
-    hot,
-    "how_populated",
-    type = "dropdown",
-    source = c("", lookup$how_populated),
-    strict = TRUE,
-    allowInvalid = FALSE,
-    wordWrap = TRUE,
-    readOnly = FALSE
-  )
+  hot
+
+  # rhandsontable::hot_col(
+  #   hot,
+  #   "how_populated",
+  #   type = "dropdown",
+  #   source = c("", lookup$how_populated),
+  #   strict = TRUE,
+  #   allowInvalid = FALSE,
+  #   wordWrap = TRUE,
+  #   readOnly = FALSE
+  # )
 }
 
 save_field_metadata <- function(original, edited) {
@@ -553,18 +804,18 @@ save_field_metadata <- function(original, edited) {
     quote_column <- function(x) as.character(DBI::dbQuoteIdentifier(con, x))
 
     DBI::dbWithTransaction(con, {
-      lookup <- validate_how_lookup(DBI::dbGetQuery(
-        con,
-        SQL_HOW_POPULATED_LOOKUP
-      ))
-      codes <- edited$how_populated_lku[rows]
+      # lookup <- validate_how_lookup(DBI::dbGetQuery(
+      #   con,
+      #   SQL_HOW_POPULATED_LOOKUP
+      # ))
+      # codes <- edited$how_populated_lku[rows]
 
-      if (any(!is.na(codes) & !codes %in% lookup$how_populated_lku)) {
-        stop(
-          "A lookup code is no longer valid. Reload the editor.",
-          call. = FALSE
-        )
-      }
+      # if (any(!is.na(codes) & !codes %in% lookup$how_populated_lku)) {
+      #   stop(
+      #     "A lookup code is no longer valid. Reload the editor.",
+      #     call. = FALSE
+      #   )
+      # }
 
       compare_columns <- c(FIELD_KEYS, FIELD_EDITABLE)
 
@@ -738,7 +989,11 @@ build_database_diagram <- function(tables, relationships, selected_table = "") {
     stringsAsFactors = FALSE
   )
 
-  nodes$color <- "#e8eef7"
+  nodes$color <- ifelse(
+    startsWith(as.character(tables$table_name), "lku_") %in% TRUE,
+    "#99b7d4", # Lookup tables: blue
+    "#6ca762" # Other visible tables: green
+  )
   nodes$borderWidth <- 1
 
   selected_node_id <- if (nzchar(selected_table)) {
@@ -748,7 +1003,7 @@ build_database_diagram <- function(tables, relationships, selected_table = "") {
   }
 
   if (nzchar(selected_node_id) && selected_node_id %in% nodes$id) {
-    nodes$color[nodes$id == selected_node_id] <- "#2c7fb8"
+    nodes$color[nodes$id == selected_node_id] <- "#ca7830"
     nodes$borderWidth[nodes$id == selected_node_id] <- 3
   }
 
@@ -855,7 +1110,7 @@ SELECT
   table_name,
   field_name,
   field_description,
-  how_populated_lku,
+  how_populated,
   deprecated
 FROM database_meta.data4app_fields
 ORDER BY schema_name, table_name, field_name

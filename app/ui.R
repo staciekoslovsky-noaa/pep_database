@@ -13,7 +13,9 @@ fluidPage(
       selectInput(
         "table",
         "Table",
-        choices = c("All tables" = "")
+        choices = c("All tables" = ""),
+        selected = "",
+        selectize = FALSE
       ),
 
       checkboxInput(
@@ -166,79 +168,66 @@ fluidPage(
             )
           ),
 
+          checkboxInput(
+            "diagram_show_lookup",
+            "Show lookup tables",
+            value = TRUE
+          ),
+
           # Full-width diagram
           fluidRow(
             column(
               12,
               visNetwork::visNetworkOutput("database_diagram", height = "760px")
             )
-          ),
-
-          br(),
-
-          # Details moved to bottom
-          fluidRow(
-            column(
-              12,
-              wellPanel(
-                style = paste(
-                  "max-height: 260px;",
-                  "overflow-y: auto;",
-                  "overflow-wrap: anywhere;"
-                ),
-                tabindex = "0",
-                role = "region",
-                `aria-label` = "Table and join details",
-
-                h4(textOutput("diagram_selection_title")),
-                verbatimTextOutput("diagram_selection_details"),
-                hr(),
-                h4("Join relationships"),
-                uiOutput("diagram_relationships_panel")
-              )
-            )
           )
         ),
 
         tabPanel(
-          "Edit Table Description",
+          "Edit Table Descriptions",
           br(),
 
           helpText(
-            "Select a specific table, then load its description. ",
-            "Loading again replaces any unsaved form text."
+            "Load all existing table-description records for the selected schema. ",
+            "The sidebar Table selection is ignored. ",
+            "Changing the sidebar does not replace loaded edits."
           ),
 
           actionButton(
-            "load_description",
-            "Load selected table"
-          ),
-
-          hr(),
-
-          strong("Editing:"),
-          textOutput("edit_target"),
-
-          br(),
-
-          textAreaInput(
-            "description",
-            "Table description",
-            value = "",
-            rows = 6,
-            width = "100%"
+            "load_table_grid",
+            "Load schema descriptions"
           ),
 
           actionButton(
-            "save_description",
-            "Save to database",
+            "save_table_grid",
+            "Save all changes",
             class = "btn-primary"
           ),
 
           actionButton(
-            "cancel_edit",
-            "Clear form"
-          )
+            "reset_table_grid",
+            "Discard unsaved changes"
+          ),
+
+          br(),
+          br(),
+
+          textOutput("table_grid_target"),
+          textOutput("table_grid_changes"),
+
+          helpText(
+            "Edit descriptions or paste a rectangular range of text. ",
+            "Record identifiers are read-only. ",
+            "Finish the last cell edit with Enter before saving."
+          ),
+
+          helpText(
+            "Clearing a populated description saves an empty string. ",
+            "Untouched NULL descriptions remain NULL. ",
+            "Discard restores the loaded snapshot, not a fresh database read."
+          ),
+
+          uiOutput("table_grid_container")
         ),
 
         tabPanel(
@@ -277,12 +266,12 @@ fluidPage(
             "Finish the last cell edit with Enter before saving."
           ),
 
-          helpText(
-            "how_populated shows lookup descriptions; ",
-            "the matching code is saved automatically. ",
-            "A blank choice saves NULL. ",
-            "deprecated and record identifiers are read-only."
-          ),
+          # helpText(
+          #   "how_populated shows lookup descriptions; ",
+          #   "the matching code is saved automatically. ",
+          #   "A blank choice saves NULL. ",
+          #   "deprecated and record identifiers are read-only."
+          # ),
 
           helpText(
             "Clearing populated text saves an empty string. ",
@@ -291,6 +280,25 @@ fluidPage(
           ),
 
           uiOutput("field_grid_container")
+        ),
+        tabPanel(
+          "Download Data",
+          br(),
+          helpText(
+            "Choose a schema and table using the sidebar. ",
+            "Select all rows or a sample of up to 500 rows. ",
+            "Large-table samples are approximate; downloading all rows may take longer."
+          ),
+          radioButtons(
+            "download_rows",
+            "Rows to download",
+            choices = c(
+              "Sample (up to 500)" = "sample",
+              "All rows" = "all"
+            ),
+            selected = "sample"
+          ),
+          downloadButton("download_csv", "Download CSV")
         )
       )
     )

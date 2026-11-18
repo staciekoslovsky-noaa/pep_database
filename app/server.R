@@ -4,7 +4,7 @@ function(input, output, session) {
   # ---------------------------------------------------------------------------
 
   metadata_saved <- reactiveVal(0L)
-  editing_table <- reactiveVal(NULL)
+
   field_sheet <- reactiveVal(NULL)
   sheet_number <- 0L
 
@@ -15,11 +15,6 @@ function(input, output, session) {
       type = "error",
       duration = NULL
     )
-  }
-
-  clear_table_editor <- function() {
-    editing_table(NULL)
-    updateTextAreaInput(session, "description", value = "")
   }
 
   # ---------------------------------------------------------------------------
@@ -139,107 +134,213 @@ function(input, output, session) {
   })
 
   # ---------------------------------------------------------------------------
-  # Table-description editor
+  # Schema-wide table-description editor
   # ---------------------------------------------------------------------------
 
-  output$edit_target <- renderText({
-    record <- editing_table()
+  table_sheet <- reactiveVal(NULL)
+  table_sheet_number <- 0L
 
-    if (is.null(record)) {
-      return("No record loaded.")
+  start_table_sheet <- function(original, schema_name) {
+    grid <- make_table_grid(original)
+    previous <- isolate(table_sheet())
+
+    if (!is.null(previous)) {
+      output[[previous$id]] <- NULL
     }
 
-    paste0(
-      record$schema_name[[1]],
-      ".",
-      record$table_name[[1]],
-      " (metadata ID: ",
-      record$id[[1]],
-      ")"
+    table_sheet_number <<- table_sheet_number + 1L
+    widget_id <- paste0("table_sheet_", table_sheet_number)
+
+    output[[widget_id]] <- rhandsontable::renderRHandsontable({
+      table_editor_hotable(grid)
+    })
+
+    table_sheet(list(
+      id = widget_id,
+      original = original,
+      schema_name = schema_name
+    ))
+  }
+
+  clear_table_sheet <- function() {
+    current <- isolate(table_sheet())
+
+    if (!is.null(current)) {
+      output[[current$id]] <- NULL
+    }
+
+    table_sheet(NULL)
+  }
+
+  output$table_grid_container <- renderUI({
+    sheet <- table_sheet()
+
+    if (is.null(sheet)) {
+      return(helpText("No table descriptions loaded."))
+    }
+
+    rhandsontable::rHandsontableOutput(sheet$id, height = "650px")
+  })
+
+  current_table_data <- reactive({
+    sheet <- table_sheet()
+
+    if (is.null(sheet)) {
+      return(NULL)
+    }
+
+    payload <- input[[sheet$id]]
+
+    if (is.null(payload)) {
+      return(sheet$original)
+    }
+
+    decode_table_grid(
+      rhandsontable::hot_to_r(payload),
+      sheet$original
     )
   })
 
-  observeEvent(input$load_description, {
-    selected <- selection()
+  output$table_grid_target <- renderText({
+    sheet <- table_sheet()
 
-    if (!nzchar(selected$table)) {
-      showNotification(
-        "Select a specific table, not All tables.",
-        type = "warning"
-      )
-      return()
+    if (is.null(sheet)) {
+      return("No table descriptions loaded.")
     }
 
-    clear_table_editor()
+    paste0(
+      "Loaded schema: ",
+      sheet$schema_name,
+      " — ",
+      nrow(sheet$original),
+      " record(s)"
+    )
+  })
+
+  output$table_grid_changes <- renderText({
+    sheet <- table_sheet()
+
+    if (is.null(sheet)) {
+      return("0 records with unsaved changes.")
+    }
 
     tryCatch(
       {
-        record <- load_table_description(selected$schema, selected$table)
+        count <- length(changed_table_rows(
+          sheet$original,
+          current_table_data()
+        ))
 
-        if (is.null(record)) {
+        paste(count, "record(s) with unsaved changes.")
+      },
+      error = function(e) {
+        paste("Cannot save yet:", conditionMessage(e))
+      }
+    )
+  })
+
+  observeEvent(input$load_table_grid, {
+    req(input$schema)
+
+    tryCatch(
+      {
+        current <- table_sheet()
+
+        if (
+          !is.null(current) &&
+            length(changed_table_rows(
+              current$original,
+              current_table_data()
+            )) >
+              0L
+        ) {
           showNotification(
-            "No existing description record was found.",
+            "Save or discard your edits before loading another schema.",
             type = "warning"
           )
           return()
         }
 
-        editing_table(record)
-        updateTextAreaInput(
-          session,
-          "description",
-          value = display_text(record$table_description[[1]])
-        )
+        original <- load_table_metadata(input$schema)
+
+        if (nrow(original) == 0L) {
+          showNotification(
+            "No existing table-description records matched this schema.",
+            type = "warning"
+          )
+          return()
+        }
+
+        start_table_sheet(original, input$schema)
       },
       error = function(e) {
-        notify_error("Description load failed.", e)
+        notify_error(
+          "Table load failed. Discard invalid edits first if necessary.",
+          e
+        )
       }
     )
   })
 
-  observeEvent(input$cancel_edit, {
-    clear_table_editor()
+  observeEvent(input$reset_table_grid, {
+    sheet <- table_sheet()
+    req(!is.null(sheet))
+    start_table_sheet(sheet$original, sheet$schema_name)
+
+    showNotification(
+      "Unsaved table-description edits discarded.",
+      type = "message"
+    )
   })
 
-  observeEvent(input$save_description, {
-    original <- editing_table()
+  observeEvent(input$save_table_grid, {
+    sheet <- table_sheet()
 
-    if (is.null(original)) {
-      showNotification("Load a table description first.", type = "warning")
-      return()
-    }
-
-    req(!is.null(input$description))
-    description <- input$description
-
-    if (description == "" && is.na(original$table_description[[1]])) {
-      description <- NA_character_
-    }
-
-    if (same_metadata_value(description, original$table_description[[1]])) {
-      showNotification("No changes to save.")
+    if (is.null(sheet)) {
+      showNotification(
+        "Load table descriptions first.",
+        type = "warning"
+      )
       return()
     }
 
     tryCatch(
       {
-        save_table_description(original, description)
-        clear_table_editor()
+        count <- save_table_metadata(
+          sheet$original,
+          current_table_data()
+        )
+
+        if (count == 0L) {
+          showNotification("No changes to save.")
+          return()
+        }
+
+        clear_table_sheet()
         metadata_saved(metadata_saved() + 1L)
-        showNotification("Table description saved.", type = "message")
+
+        showNotification(
+          paste(
+            count,
+            "table description(s) saved. Load records to continue."
+          ),
+          type = "message"
+        )
       },
       error = function(e) {
-        notify_error("Save failed; your text remains in the form.", e)
+        notify_error(
+          "Batch save failed; edits remain in the spreadsheet.",
+          e
+        )
       }
     )
   })
-
   # ---------------------------------------------------------------------------
   # Spreadsheet lifecycle
   # ---------------------------------------------------------------------------
 
-  start_field_sheet <- function(original, lookup, target) {
-    grid <- make_field_grid(original, lookup)
+  start_field_sheet <- function(original, target) {
+    grid <- make_field_grid(original)
     previous <- isolate(field_sheet())
 
     if (!is.null(previous)) {
@@ -250,13 +351,12 @@ function(input, output, session) {
     widget_id <- paste0("field_sheet_", sheet_number)
 
     output[[widget_id]] <- rhandsontable::renderRHandsontable({
-      field_editor_hotable(grid, lookup)
+      field_editor_hotable(grid)
     })
 
     field_sheet(list(
       id = widget_id,
       original = original,
-      lookup = lookup,
       target = target
     ))
   }
@@ -293,7 +393,7 @@ function(input, output, session) {
     }
 
     grid <- rhandsontable::hot_to_r(payload)
-    decode_field_grid(grid, sheet$original, sheet$lookup)
+    decode_field_grid(grid, sheet$original)
   })
 
   output$field_grid_target <- renderText({
@@ -347,7 +447,7 @@ function(input, output, session) {
         }
 
         original <- load_field_metadata(selected$schema, selected$table)
-        lookup <- load_how_populated_lookup()
+        # lookup <- load_how_populated_lookup()
 
         if (nrow(original) == 0L) {
           showNotification(
@@ -363,7 +463,7 @@ function(input, output, session) {
           if (nzchar(selected$table)) selected$table else "(all tables)"
         )
 
-        start_field_sheet(original, lookup, target)
+        start_field_sheet(original, target)
       },
       error = function(e) {
         notify_error(
@@ -378,7 +478,7 @@ function(input, output, session) {
     sheet <- field_sheet()
     req(!is.null(sheet))
 
-    start_field_sheet(sheet$original, sheet$lookup, sheet$target)
+    start_field_sheet(sheet$original, sheet$target)
     showNotification("Unsaved edits discarded.", type = "message")
   })
 
@@ -418,156 +518,101 @@ function(input, output, session) {
   # Database diagram
   # ---------------------------------------------------------------------------
 
-  diagram_selection <- reactiveVal(NULL)
-
-  observeEvent(input$diagram_scope, {
-    diagram_selection(NULL)
-  })
-
   diagram_data <- reactive({
-    req(input$schema)
-    req(length(input$table) == 1L)
-
+    selected <- selection()
     scope <- input$diagram_scope %||% "selected"
 
-    all_tables <- load_diagram_tables(input$schema, "")
-    all_relationships <- load_diagram_relationships(input$schema, "")
+    tables <- load_diagram_tables(selected$schema, "")
+    relationships <- load_diagram_relationships(selected$schema, "")
 
-    if (scope == "schema") {
-      return(list(
-        tables = all_tables,
-        relationships = all_relationships
-      ))
+    if (!isTRUE(input$diagram_show_lookup)) {
+      is_lookup <- startsWith(
+        as.character(tables$table_name),
+        "lku_"
+      ) %in%
+        TRUE
+
+      tables <- tables[!is_lookup, , drop = FALSE]
     }
 
-    selected_table <- input$table
-    req(nzchar(selected_table))
+    visible_tables <- tables$table_name
 
-    # 2-hop expansion from selected table
-    hop1 <- unique(c(
-      selected_table,
-      all_relationships$table_name_1[
-        all_relationships$table_name_2 == selected_table
-      ],
-      all_relationships$table_name_2[
-        all_relationships$table_name_1 == selected_table
-      ]
-    ))
-
-    hop2 <- unique(c(
-      hop1,
-      all_relationships$table_name_1[all_relationships$table_name_2 %in% hop1],
-      all_relationships$table_name_2[all_relationships$table_name_1 %in% hop1]
-    ))
-
-    tables <- all_tables[all_tables$table_name %in% hop2, , drop = FALSE]
-    rels <- all_relationships[
-      all_relationships$table_name_1 %in%
-        hop2 &
-        all_relationships$table_name_2 %in% hop2,
+    relationships <- relationships[
+      relationships$table_name_1 %in%
+        visible_tables &
+        relationships$table_name_2 %in% visible_tables,
       ,
       drop = FALSE
     ]
 
-    list(tables = tables, relationships = rels)
-  })
+    if (identical(scope, "selected")) {
+      validate(need(
+        nzchar(selected$table),
+        "Select a table in the sidebar or choose Whole schema."
+      ))
 
-  output$database_diagram <- visNetwork::renderVisNetwork({
-    data <- diagram_data()
+      validate(need(
+        selected$table %in% visible_tables,
+        paste(
+          "The selected table is hidden.",
+          "Enable Show lookup tables or select another table."
+        )
+      ))
 
-    build_database_diagram(
-      data$tables,
-      data$relationships,
-      selected_table = if (identical(input$diagram_scope, "selected")) {
-        input$table
+      hop1 <- unique(c(
+        selected$table,
+        relationships$table_name_1[
+          relationships$table_name_2 %in% selected$table
+        ],
+        relationships$table_name_2[
+          relationships$table_name_1 %in% selected$table
+        ]
+      ))
+
+      hop2 <- unique(c(
+        hop1,
+        relationships$table_name_1[
+          relationships$table_name_2 %in% hop1
+        ],
+        relationships$table_name_2[
+          relationships$table_name_1 %in% hop1
+        ]
+      ))
+
+      tables <- tables[
+        tables$table_name %in% hop2,
+        ,
+        drop = FALSE
+      ]
+
+      relationships <- relationships[
+        relationships$table_name_1 %in%
+          tables$table_name &
+          relationships$table_name_2 %in% tables$table_name,
+        ,
+        drop = FALSE
+      ]
+    }
+
+    list(
+      tables = tables,
+      relationships = relationships,
+      selected_table = if (identical(scope, "selected")) {
+        selected$table
       } else {
         ""
       }
     )
   })
 
-  output$diagram_selection_title <- renderText({
-    selected <- diagram_selection()
-    if (is.null(selected)) {
-      return("No diagram node selected.")
-    }
-    paste0(selected$schema_name, ".", selected$table_name)
-  })
+  output$database_diagram <- visNetwork::renderVisNetwork({
+    data <- diagram_data()
 
-  output$diagram_selection_details <- renderText({
-    selected <- diagram_selection()
-    if (is.null(selected)) {
-      return("Click a table in the diagram to see details here.")
-    }
-
-    paste(
-      "Table:",
-      selected$table_name,
-      "\nDescription:",
-      selected$table_description,
-      "\nDeprecated:",
-      selected$deprecated
+    build_database_diagram(
+      tables = data$tables,
+      relationships = data$relationships,
+      selected_table = data$selected_table
     )
-  })
-
-  output$diagram_relationships_panel <- renderUI({
-    selected <- diagram_selection()
-    if (is.null(selected)) {
-      return(helpText("Select a table node to see join relationships."))
-    }
-
-    rels <- load_diagram_relationships(input$schema, "")
-    related <- rels[
-      rels$table_name_1 == selected$table_name |
-        rels$table_name_2 == selected$table_name,
-      ,
-      drop = FALSE
-    ]
-
-    if (nrow(related) == 0L) {
-      return(helpText("No join relationships found for this table."))
-    }
-
-    tags$ul(lapply(seq_len(nrow(related)), function(i) {
-      rel <- related[i, , drop = FALSE]
-      tags$li(HTML(paste0(
-        "<b>",
-        rel$table_name_1[[1]],
-        ".",
-        rel$field_name_1[[1]],
-        "</b> → ",
-        "<b>",
-        rel$table_name_2[[1]],
-        ".",
-        rel$field_name_2[[1]],
-        "</b>",
-        "<br/>Join type: ",
-        rel$join_type_1to2[[1]]
-      )))
-    }))
-  })
-
-  observeEvent(input$database_diagram_selected, {
-    sel <- input$database_diagram_selected
-
-    if (is.null(sel)) {
-      diagram_selection(NULL)
-      return()
-    }
-
-    selected_table_id <- sel[1]
-    selected_tables <- load_diagram_tables(input$schema, "")
-
-    match_row <- selected_tables[
-      paste0(selected_tables$schema_name, ".", selected_tables$table_name) ==
-        selected_table_id,
-      ,
-      drop = FALSE
-    ]
-
-    if (nrow(match_row) == 1L) {
-      diagram_selection(match_row)
-    }
   })
 
   # ---------------------------------------------------------------------------
@@ -631,7 +676,7 @@ function(input, output, session) {
         check.names = FALSE
       )
     } else if (identical(issue, "Missing how_populated")) {
-      idx <- !has_text(d$fields$how_populated_lku)
+      idx <- !has_text(d$fields$how_populated)
       x <- data.frame(
         Schema = as.character(d$fields$schema_name[idx]),
         Table = as.character(d$fields$table_name[idx]),
@@ -783,5 +828,37 @@ function(input, output, session) {
       )
     },
     server = TRUE
+  )
+
+  output$download_csv <- downloadHandler(
+    filename = function() {
+      selected <- selection()
+      safe_name <- function(x) {
+        gsub("[^[:alnum:]_.-]", "_", x)
+      }
+
+      paste0(
+        safe_name(selected$schema),
+        "_",
+        safe_name(if (nzchar(selected$table)) selected$table else "all_tables"),
+        "_",
+        format(Sys.Date(), "%Y%m%d"),
+        ".csv"
+      )
+    },
+    content = function(file) {
+      selected <- selection()
+
+      if (!nzchar(selected$table)) {
+        stop("Select a specific table in the sidebar before downloading.")
+      }
+
+      download_table_csv(
+        selected$schema,
+        selected$table,
+        input$download_rows,
+        file
+      )
+    }
   )
 }

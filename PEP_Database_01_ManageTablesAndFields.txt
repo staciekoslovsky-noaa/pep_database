@@ -7,6 +7,17 @@ WHERE table_type = 'BASE TABLE'
 AND table_schema <> 'pg_catalog' AND table_schema <> 'information_schema' AND table_schema <> 'public'
 AND (table_schema, table_name) NOT IN (SELECT schema_name, table_name FROM database_meta.tbl_table_descriptions);
 
+DELETE FROM database_meta.tbl_table_descriptions
+WHERE table_name LIKE '%OLD%' OR 
+table_name LIKE '%old%' OR 
+table_name LIKE 'X_%' OR 
+table_name LIKE '%_X';
+
+UPDATE database_meta.tbl_table_descriptions
+SET table_description = 'Descriptions for values in the ' || REPLACE(table_name, 'lku_', '') || '_lku field'
+WHERE table_name LIKE 'lku_%' 
+AND table_description IS NULL;
+
 UPDATE database_meta.tbl_table_descriptions
 SET deprecated = TRUE
 WHERE (schema_name, table_name) NOT IN (SELECT table_schema, table_name
@@ -22,6 +33,12 @@ ON c.table_schema = t.table_schema
 AND c.table_name = t.table_name
 WHERE c.table_schema <> 'pg_catalog' AND c.table_schema <> 'information_schema' AND c.table_schema <> 'public' AND t.table_type = 'BASE TABLE'
 AND (table_schema, table_name, column_name) NOT IN (SELECT schema_name, table_name, field_name FROM database_meta.tbl_field_descriptions);
+
+DELETE FROM database_meta.tbl_field_descriptions
+WHERE table_name LIKE '%OLD%' OR 
+table_name LIKE '%old%' OR 
+table_name LIKE 'X_%' OR 
+table_name LIKE '%_X';
 
 UPDATE database_meta.tbl_field_descriptions
 SET deprecated = TRUE
