@@ -286,14 +286,14 @@ fluidPage(
           br(),
           helpText(
             "Choose a schema and table using the sidebar. ",
-            "Select all rows or a sample of up to 500 rows. ",
+            "Select all rows or a sample of up to 5000 rows. ",
             "Large-table samples are approximate; downloading all rows may take longer."
           ),
           radioButtons(
             "download_rows",
             "Rows to download",
             choices = c(
-              "Sample (up to 500)" = "sample",
+              "Sample (up to 5000)" = "sample",
               "All rows" = "all"
             ),
             selected = "sample"

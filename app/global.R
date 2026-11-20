@@ -80,7 +80,7 @@ download_table_csv <- function(schema_name, table_name, row_mode, file) {
       }
 
       if (is.finite(estimate) && estimate >= 0 && estimate <= 100000) {
-        sql <- paste("SELECT * FROM", table_id, "ORDER BY random() LIMIT 500")
+        sql <- paste("SELECT * FROM", table_id, "ORDER BY random() LIMIT 5000")
       } else {
         percent <- if (is.finite(estimate) && estimate > 0) {
           min(100, max(0.1, 200000 / estimate))
